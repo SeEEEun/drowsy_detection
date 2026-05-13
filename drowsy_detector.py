@@ -71,8 +71,9 @@ LEVEL_2_THRESHOLD  = 4      # 점수 ≥ 4 → Level 2 (주의)
 LEVEL_3_THRESHOLD  = 7      # 점수 ≥ 7 → Level 3 (전투력 상실)
 
 # [전송 정책]
-SEND_INTERVAL_SECONDS = 1.0   # 정상 상태일 때도 N초마다 한 번씩 송신 (heartbeat)
+SEND_INTERVAL_SECONDS = 5.0   # heartbeat 주기 (정상 상태일 때 송신 간격)
 LEVEL3_COOLDOWN       = 5.0   # Level 3 신호 전송 후 재전송 대기
+CONSOLE_ON_CHANGE_ONLY = True  # 콘솔은 레벨 바뀔 때만 출력 (False면 매번 출력)
 
 # ═══════════════════════════════════════════════════
 #  통신 초기화
@@ -119,7 +120,7 @@ def level_to_korean(level):
 # ═══════════════════════════════════════════════════
 #  상태 코드 전송 (1KB 미만 페이로드)
 # ═══════════════════════════════════════════════════
-def send_status(level, score, reason=""):
+def send_status(level, score, reason="", level_changed=False):
     """모든 활성 채널로 상태 코드 송신"""
     payload = {
         "vid":   VEHICLE_ID,
@@ -144,10 +145,11 @@ def send_status(level, score, reason=""):
         except Exception as e:
             print(f"⚠️ MQTT 송신 실패: {e}")
 
-    # 콘솔 출력
+    # 콘솔 출력 (레벨 바뀔 때만, 또는 매번)
     if USE_CONSOLE:
-        icon = {1: "🟢", 2: "🟡", 3: "🔴"}[level]
-        print(f"{icon} [Level {level} - {level_to_korean(level)}] {msg}")
+        if (not CONSOLE_ON_CHANGE_ONLY) or level_changed:
+            icon = {1: "🟢", 2: "🟡", 3: "🔴"}[level]
+            print(f"{icon} [Level {level} - {level_to_korean(level)}] {msg}")
 
 # ═══════════════════════════════════════════════════
 #  MediaPipe 초기화
@@ -221,6 +223,8 @@ last_reason       = ""
 cap = cv2.VideoCapture(1)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_FPS, 30)         # 프레임레이트 명시
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # 버퍼 1개만 → 지연 최소화
 time.sleep(1.0)
 for _ in range(5):
     cap.read()
@@ -296,7 +300,7 @@ while cap.isOpened():
             bar_w = int(w * ratio_ear)
             cv2.rectangle(frame, (0, h-20), (bar_w, h),
                           (0, int(255*(1-ratio_ear)), int(255*ratio_ear)), -1)
-            cv2.putText(frame, f"눈 감김: {closed_dur:.1f}s / {EAR_CONSEC_SECONDS}s",
+            cv2.putText(frame, f"Eye Closed: {closed_dur:.1f}s / {EAR_CONSEC_SECONDS}s",
                         (10, h-28), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
 
             if closed_dur >= EAR_CONSEC_SECONDS and not ear_scored:
@@ -317,7 +321,7 @@ while cap.isOpened():
                 mar_scored       = False
             open_dur = now - mouth_open_start
 
-            cv2.putText(frame, f"하품: {open_dur:.1f}s / {MAR_CONSEC_SECONDS}s",
+            cv2.putText(frame, f"Yawn: {open_dur:.1f}s / {MAR_CONSEC_SECONDS}s",
                         (10, h-50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
 
             if open_dur >= MAR_CONSEC_SECONDS and not mar_scored:
@@ -378,7 +382,8 @@ while cap.isOpened():
             should_send = False  # cooldown 중엔 재전송 안 함
 
         if should_send:
-            send_status(current_level, danger_score, last_reason)
+            level_changed = (current_level != last_sent_level)
+            send_status(current_level, danger_score, last_reason, level_changed)
             last_sent_level = current_level
             last_send_time  = now
 
@@ -391,31 +396,32 @@ while cap.isOpened():
                     (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,0), 1)
         cv2.putText(frame, f"MAR: {mar:.3f}  (> {MAR_THRESHOLD})",
                     (10, 88), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,0), 1)
-        cv2.putText(frame, f"끄덕임: {nod_count} / {NOD_COUNT_TRIGGER}",
+        cv2.putText(frame, f"Nod: {nod_count} / {NOD_COUNT_TRIGGER}",
                     (10, 111), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,0), 1)
-        cv2.putText(frame, f"하품: {yawn_count}회",
+        cv2.putText(frame, f"Yawn Count: {yawn_count}",
                     (10, 134), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,0), 1)
 
         if on_level3_cooldown:
             remain = LEVEL3_COOLDOWN - (now - last_level3_time)
-            cv2.putText(frame, f"재감지 대기: {remain:.1f}s",
+            cv2.putText(frame, f"Cooldown: {remain:.1f}s",
                         (10, 157), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180,180,180), 1)
 
     else:
         current_level = 1  # 얼굴 미감지 시 일단 정상으로 (혹은 별도 Level 처리)
-        cv2.putText(frame, "얼굴 미감지",
-                    (w//2 - 80, h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,100,255), 2)
+        cv2.putText(frame, "No Face Detected",
+                    (w//2 - 110, h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,100,255), 2)
 
     # ── 게이지 ──
     gauge_w = int(w * min(danger_score / LEVEL_3_THRESHOLD, 1.0))
     cv2.rectangle(frame, (0, 42), (w, 58), (50,50,50), -1)
     cv2.rectangle(frame, (0, 42), (gauge_w, 58), score_color, -1)
-    cv2.putText(frame, f"위험점수: {danger_score:.1f} / {LEVEL_3_THRESHOLD}",
+    cv2.putText(frame, f"Score: {danger_score:.1f} / {LEVEL_3_THRESHOLD}",
                 (w-220, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255,255,255), 1)
 
     # ── 상태바 ──
     level_color = {1: (0,200,0), 2: (0,165,255), 3: (0,0,255)}[current_level]
-    status_text = f"Level {current_level} - {level_to_korean(current_level)}"
+    level_name_en = {1: "NORMAL", 2: "CAUTION", 3: "DANGER"}[current_level]
+    status_text = f"Level {current_level} - {level_name_en}"
     cv2.rectangle(frame, (0,0), (w, 42), (30,30,30), -1)
     cv2.putText(frame, status_text, (10, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, level_color, 2)
